@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { initializeApp } from "firebase/app";
 import { getDatabase, ref, onValue, set } from "firebase/database";
+import { Pencil, Mic, MicOff } from "lucide-react";
 
 // Your web app's Firebase configuration
 const firebaseConfig = {
@@ -54,10 +55,13 @@ interface LogEntry {
 }
 
 // ── Firebase Realtime connection hook ─────────────────────
-function useFirebase(addLog: (type: LogType, msg: string) => void) {
+function useFirebase(addLog: (type: LogType, msg: string) => void, deviceLabels: Record<string, string>) {
   const [states, setStates]           = useState<Record<string, boolean>>(() => Object.fromEntries(DEVICES.map(d => [d.id, false])));
   const [connected, setConnected]     = useState(false);
   const [esp32Online, setEsp32Online] = useState(false);
+  const [esp32Ssid, setEsp32Ssid]     = useState("");
+  const [esp32Ip, setEsp32Ip]         = useState("");
+  const [esp32BootPressed, setEsp32BootPressed] = useState(false);
   const addLogRef = useRef(addLog);
   useEffect(() => { addLogRef.current = addLog; }, [addLog]);
 
@@ -96,29 +100,69 @@ function useFirebase(addLog: (type: LogType, msg: string) => void) {
       addLogRef.current("error", `Loi status: ${err.message}`);
     });
 
+    // Listen to ESP32 connected Wi-Fi SSID
+    const ssidRef = ref(db, "status/ssid");
+    const unsubSsid = onValue(ssidRef, (snap) => {
+      setEsp32Ssid(snap.val() || "");
+    }, (err) => {
+      console.warn("Loi load SSID:", err.message);
+    });
+
+    // Listen to ESP32 local IP
+    const ipRef = ref(db, "status/ip");
+    const unsubIp = onValue(ipRef, (snap) => {
+      setEsp32Ip(snap.val() || "");
+    }, (err) => {
+      console.warn("Loi load IP:", err.message);
+    });
+
+    // Listen to real-time status of physical Boot Button (GPIO 9)
+    const bootPressedRef = ref(db, "status/boot_pressed");
+    const unsubBootPressed = onValue(bootPressedRef, (snap) => {
+      setEsp32BootPressed(snap.val() === true);
+    }, (err) => {
+      console.warn("Loi load boot_pressed status:", err.message);
+    });
+
     return () => {
       unsubConnection();
       unsubDevices();
       unsubStatus();
+      unsubSsid();
+      unsubIp();
+      unsubBootPressed();
     };
   }, []);
 
-  const toggle = async (id: string) => {
-    const next = !states[id];
+  const toggle = async (id: string, forceState?: boolean) => {
+    const current = states[id] || false;
+    const next = forceState !== undefined ? forceState : !current;
     const dev  = DEVICES.find(d => d.id === id);
+    const label = deviceLabels[id] || dev?.label || id;
     setStates(prev => ({ ...prev, [id]: next }));
-    addLogRef.current("toggle", `${dev?.label}: ${next ? "BAT" : "TAT"}`);
+    addLogRef.current("toggle", `${label}: ${next ? "BAT" : "TAT"}`);
     try {
       const deviceRef = ref(db, `devices/${id}`);
       await set(deviceRef, next);
-      addLogRef.current("success", `Ghi OK: ${dev?.label}`);
+      addLogRef.current("success", `Ghi OK: ${label}`);
     } catch (e: any) {
-      setStates(prev => ({ ...prev, [id]: !next }));
+      setStates(prev => ({ ...prev, [id]: current }));
       addLogRef.current("error", `Ghi loi: ${e.message}`);
     }
   };
 
-  return { states, connected, esp32Online, toggle };
+  const triggerWifiReset = async () => {
+    addLogRef.current("warn", "Đang gửi yêu cầu xóa cấu hình Wi-Fi & Reset thiết bị...");
+    try {
+      const resetRef = ref(db, "devices/reset_wifi");
+      await set(resetRef, true);
+      addLogRef.current("success", "Đã gửi lệnh xoá Wi-Fi thành công! Chờ thiết bị phản hồi...");
+    } catch (e: any) {
+      addLogRef.current("error", `Lỗi gửi lệnh reset: ${e.message}`);
+    }
+  };
+
+  return { states, connected, esp32Online, esp32Ssid, esp32Ip, esp32BootPressed, toggle, triggerWifiReset };
 }
 
 // ── Stars ─────────────────────────────────────────────────────
@@ -149,11 +193,37 @@ interface DeviceCardProps {
   icon: string;
   on: boolean;
   onToggle: () => void;
+  onRename: (newLabel: string) => void;
 }
 
-function DeviceCard({ label, icon, on, onToggle }: DeviceCardProps) {
+function DeviceCard({ label, icon, on, onToggle, onRename }: DeviceCardProps) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [editVal, setEditVal] = useState(label);
+
+  // Synchronize internal state when label prop changes from outside
+  useEffect(() => {
+    setEditVal(label);
+  }, [label]);
+
+  const handleSave = () => {
+    const trimmed = editVal.trim();
+    if (trimmed && trimmed !== label) {
+      onRename(trimmed);
+    }
+    setIsEditing(false);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      handleSave();
+    } else if (e.key === "Escape") {
+      setEditVal(label);
+      setIsEditing(false);
+    }
+  };
+
   return (
-    <div style={{ display:"flex",flexDirection:"column",alignItems:"center",gap:15 }}>
+    <div style={{ display:"flex",flexDirection:"column",alignItems:"center",gap:12, width: "100%" }}>
       <button onClick={onToggle} style={{
         position:"relative",width:"100%",aspectRatio:"0.65",
         borderRadius:28,cursor:"pointer",
@@ -196,10 +266,78 @@ function DeviceCard({ label, icon, on, onToggle }: DeviceCardProps) {
           transition:"all .4s",
         }}/>
       </button>
-      <span style={{
-        fontSize:11,fontWeight:700,color:"rgba(255,255,255,.4)",
-        letterSpacing:"1.5px",textAlign:"center",textTransform:"uppercase",
-      }}>{label}</span>
+
+      {isEditing ? (
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 4,
+          width: "100%",
+          justifyContent: "center"
+        }}>
+          <input
+            type="text"
+            value={editVal}
+            onChange={(e) => setEditVal(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onBlur={handleSave}
+            autoFocus
+            style={{
+              width: "100%",
+              maxWidth: 120,
+              background: "rgba(0,0,0,0.6)",
+              border: "1px solid #00d4a0",
+              borderRadius: 6,
+              color: "#fff",
+              fontSize: 10,
+              fontWeight: 700,
+              padding: "4px 6px",
+              textAlign: "center",
+              outline: "none"
+            }}
+          />
+        </div>
+      ) : (
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          justifyContent: "center",
+          width: "100%",
+          cursor: "pointer"
+        }}
+        onClick={() => setIsEditing(true)}
+        title="Nhấp để đổi tên công tắc"
+        >
+          <span style={{
+            fontSize:11,
+            fontWeight:700,
+            color:"rgba(255,255,255,.4)",
+            letterSpacing:"1px",
+            textAlign:"center",
+            textTransform:"uppercase",
+            textOverflow: "ellipsis",
+            overflow: "hidden",
+            whiteSpace: "nowrap",
+            maxWidth: 110,
+            transition: "all 0.2s"
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.color = "#00d4a0";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.color = "rgba(255,255,255,.4)";
+          }}
+          >
+            {label}
+          </span>
+          <Pencil size={9} style={{
+            color: "rgba(255,255,255,0.25)",
+            cursor: "pointer",
+            flexShrink: 0
+          }}/>
+        </div>
+      )}
     </div>
   );
 }
@@ -309,17 +447,500 @@ function ActivityLog({ logs, onClear }: ActivityLogProps) {
   );
 }
 
+const normalizeText = (text: string): string => {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // Remove Vietnamese accents
+    .replace(/đ/g, "d")
+    .replace(/[^a-z0-9 ]/g, "")
+    .trim();
+};
+
+interface VoicePanelProps {
+  toggle: (id: string, forceState?: boolean) => Promise<void>;
+  deviceLabels: Record<string, string>;
+  addLog: (type: LogType, msg: string) => void;
+}
+
+function VoicePanel({ toggle, deviceLabels, addLog }: VoicePanelProps) {
+  const [supported, setSupported] = useState(true);
+  const [listening, setListening] = useState(false);
+  const [transcript, setTranscript] = useState("");
+  const [feedback, setFeedback] = useState("Nhấn nút Micro và nói lệnh để điều khiển");
+  const [feedbackType, setFeedbackType] = useState<"info" | "success" | "error" | "warn">("info");
+  const recognitionRef = useRef<any>(null);
+
+  useEffect(() => {
+    const SpeechLib = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechLib) {
+      setSupported(false);
+      return;
+    }
+
+    const rec = new SpeechLib();
+    rec.continuous = false;
+    rec.interimResults = false;
+    rec.lang = "vi-VN";
+
+    rec.onstart = () => {
+      setListening(true);
+      setTranscript("");
+      setFeedback("Đang lắng nghe giọng nói...");
+      setFeedbackType("info");
+    };
+
+    rec.onerror = (e: any) => {
+      console.warn("Speech recognition error", e.error);
+      setListening(false);
+      if (e.error === "no-speech") {
+        setFeedback("Không nghe rõ giọng nói. Hãy nhấn nút và thử lại.");
+        setFeedbackType("warn");
+      } else if (e.error === "not-allowed") {
+        setFeedback("Lỗi: Trình duyệt chưa được cấp phép dùng Micro.");
+        setFeedbackType("error");
+      } else {
+        setFeedback(`Lỗi nhận diện: ${e.error}`);
+        setFeedbackType("error");
+      }
+    };
+
+    rec.onend = () => {
+      setListening(false);
+    };
+
+    rec.onresult = (event: any) => {
+      const resultIndex = event.resultIndex;
+      const rawText = event.results[resultIndex][0].transcript;
+      setTranscript(rawText);
+      
+      const result = handleVoiceCommand(rawText);
+      if (result.success) {
+        setFeedback(result.message);
+        setFeedbackType("success");
+        addLog("success", `🎙️ Lệnh giọng nói: "${rawText}" -> ${result.message}`);
+      } else {
+        setFeedback(`Không thể xử lý lệnh: "${rawText}".`);
+        setFeedbackType("warn");
+        addLog("warn", `🎙️ Lệnh chưa rõ: "${rawText}"`);
+      }
+    };
+
+    recognitionRef.current = rec;
+
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.abort();
+      }
+    };
+  }, [deviceLabels, toggle]);
+
+  const toggleListening = () => {
+    if (!supported) return;
+    if (listening) {
+      recognitionRef.current?.stop();
+    } else {
+      try {
+        recognitionRef.current?.start();
+      } catch (err) {
+        console.error("Failed to start speech recognition", err);
+      }
+    }
+  };
+
+  const handleVoiceCommand = (rawText: string) => {
+    const norm = normalizeText(rawText);
+    
+    const turnOnKeywords = ["bat", "mo", "kich hoat", "on", "chay", "turn on", "enable"];
+    const turnOffKeywords = ["tat", "dong", "ngat", "off", "turn off", "disable", "stop", "dung"];
+    const allKeywords = ["tat ca", "het", "toan bo", "sach", "cac thiet bi", "all"];
+
+    const hasOn = turnOnKeywords.some(kw => norm.includes(kw));
+    const hasOff = turnOffKeywords.some(kw => norm.includes(kw));
+    const hasAll = allKeywords.some(kw => norm.includes(kw));
+
+    if (hasOn && hasAll) {
+      DEVICES.forEach(dev => void toggle(dev.id, true));
+      return { success: true, message: "Đã bật tất cả thiết bị" };
+    }
+
+    if (hasOff && hasAll) {
+      DEVICES.forEach(dev => void toggle(dev.id, false));
+      return { success: true, message: "Đã tắt tất cả thiết bị" };
+    }
+
+    // Exact matching inside device custom name / original name / ID keyword
+    for (const dev of DEVICES) {
+      const customLabel = deviceLabels[dev.id] || dev.label;
+      const normCustom = normalizeText(customLabel);
+      const normDefault = normalizeText(dev.label);
+      const normId = dev.id.replace(/_/g, " ");
+
+      if (norm.includes(normCustom) || norm.includes(normDefault) || norm.includes(normId)) {
+        const targetState = hasOn ? true : hasOff ? false : undefined;
+        if (targetState !== undefined) {
+          toggle(dev.id, targetState);
+          return { success: true, message: `Thực hiện ${targetState ? "Bật" : "Tắt"} "${customLabel}"` };
+        } else {
+          toggle(dev.id);
+          return { success: true, message: `Thực hiện Chuyển đổi "${customLabel}"` };
+        }
+      }
+    }
+
+    // Partial/fuzz matching inside words of name
+    for (const dev of DEVICES) {
+      const customLabel = deviceLabels[dev.id] || dev.label;
+      const normLabel = normalizeText(customLabel);
+      const labelWords = normLabel.split(" ").filter(w => w.length > 2);
+
+      const isSubWordMatch = labelWords.some(w => norm.includes(w));
+      if (isSubWordMatch) {
+        const targetState = hasOn ? true : hasOff ? false : undefined;
+        if (targetState !== undefined) {
+          toggle(dev.id, targetState);
+          return { success: true, message: `Khớp gần đúng: ${targetState ? "Bật" : "Tắt"} "${customLabel}"` };
+        } else {
+          toggle(dev.id);
+          return { success: true, message: `Khớp gần đúng: Chuyển đổi "${customLabel}"` };
+        }
+      }
+    }
+
+    return { success: false, message: "Hãy nói rõ hơn 'bật [thiết bị]' hoặc 'tắt [thiết bị]'." };
+  };
+
+  return (
+    <div style={{
+      position: "relative", zIndex: 10, margin: "0 auto 20px",
+      maxWidth: 660, width: "calc(100% - 28px)",
+      background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)",
+      borderRadius: 24, padding: "20px 24px", display: "flex", flexDirection: "column", gap: 16,
+      backdropFilter: "blur(8px)",
+      boxShadow: "0 10px 30px rgba(0,0,0,0.3)"
+    }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: "1.5px", color: "rgba(255,255,255,0.3)", textTransform: "uppercase" }}>
+            ĐIỀU KHIỂN GIỌNG NÓI AI
+          </span>
+          {supported && (
+            <span style={{
+              fontSize: 9, padding: "2px 8px", borderRadius: 12, fontWeight: 700,
+              background: listening ? "rgba(248, 81, 73, 0.15)" : "rgba(0, 212, 160, 0.12)",
+              color: listening ? "#ff5858" : "#00d4a0",
+              letterSpacing: 1,
+            }}>
+              {listening ? "LISTENING" : "READY"}
+            </span>
+          )}
+        </div>
+        <span style={{ fontSize: 9, color: "rgba(255,255,255,0.22)", fontWeight: 600, letterSpacing: 0.5 }}>VIETNAMESE (VI-VN)</span>
+      </div>
+
+      {!supported ? (
+        <div style={{ textAlign: "center", padding: "10px 0", color: "#f85149", fontSize: 12, fontWeight: 500 }}>
+          ⚠️ Trình duyệt không hỗ trợ Web Speech API trực tiếp. Hãy đổi sang dùng Google Chrome hoặc Edge để sử dụng!
+        </div>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
+          
+          <div style={{ position: "relative", flexShrink: 0 }}>
+            <button
+              onClick={toggleListening}
+              style={{
+                width: 58, height: 58, borderRadius: "50%",
+                background: listening
+                  ? "linear-gradient(135deg, #f85149 0%, #aa2116 100%)"
+                  : "linear-gradient(135deg, #161b22 0%, #0d1117 100%)",
+                border: listening ? "1px solid rgba(248,81,73,0.5)" : "1px solid rgba(255,255,255,0.08)",
+                cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                boxShadow: listening ? "0 0 20px rgba(248,81,73,0.5)" : "0 4px 12px rgba(0,0,0,0.4)",
+                transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+                outline: "none"
+              }}
+              title={listening ? "Nhấn để dừng nhận" : "Bắt đầu thu giọng nói"}
+            >
+              {listening ? <Mic color="#fff" size={22} /> : <Mic color="#00d4a0" size={22} />}
+            </button>
+            
+            {listening && (
+              <>
+                <div style={{
+                  position: "absolute", inset: -6, borderRadius: "50%",
+                  border: "2px solid rgba(248,81,73,0.3)",
+                  animation: "pulseWave 1.2s infinite ease-out",
+                  pointerEvents: "none"
+                }}/>
+                <div style={{
+                  position: "absolute", inset: -12, borderRadius: "50%",
+                  border: "1px solid rgba(248,81,73,0.15)",
+                  animation: "pulseWave 1.2s infinite ease-out",
+                  animationDelay: "0.4s",
+                  pointerEvents: "none"
+                }}/>
+              </>
+            )}
+          </div>
+
+          <div style={{ flex: 1, minWidth: 200, display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{
+              fontSize: 13,
+              fontWeight: 600,
+              color: feedbackType === "success" ? "#00d4a0" : feedbackType === "error" ? "#f85149" : feedbackType === "warn" ? "#d29922" : "#ffffff",
+              transition: "all 0.2s"
+            }}>
+              {feedback}
+            </div>
+            
+            {transcript && (
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)" }}>
+                Nghe thấy: <span style={{ color: "#ffffff", fontWeight: 600 }}>"{transcript}"</span>
+              </div>
+            )}
+
+            {listening ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 3, height: 14, marginTop: 4 }}>
+                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].map(num => (
+                  <div key={num} style={{
+                    width: 2,
+                    background: "#f85149",
+                    borderRadius: 1,
+                    height: "100%",
+                    animation: `voiceBar 0.8s ease-in-out infinite alternate`,
+                    animationDelay: `${num * 0.05}s`
+                  }}/>
+                ))}
+              </div>
+            ) : (
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.25)" }}>
+                🗣️ Thử nói: <strong>"Bật {deviceLabels.den_phong_khach || "Đèn phòng khách"}"</strong> hoặc <strong>"Tắt tất cả"</strong>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Remote Boot Button (GPIO 9) ──────────────────────────────
+interface RemoteBootButtonProps {
+  onTrigger: () => void;
+  esp32Online: boolean;
+  esp32BootPressed: boolean;
+}
+
+function RemoteBootButton({ onTrigger, esp32Online, esp32BootPressed }: RemoteBootButtonProps) {
+  const [holding, setHolding] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const timerRef = useRef<any>(null);
+  const progressIntervalRef = useRef<any>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
+    };
+  }, []);
+
+  const handleStart = (e: React.MouseEvent | React.TouchEvent) => {
+    e.preventDefault();
+    setHolding(true);
+    setProgress(0);
+    const totalTime = 3000; // 3 seconds hold
+    const step = 50;
+    let elapsed = 0;
+
+    progressIntervalRef.current = setInterval(() => {
+      elapsed += step;
+      const pct = Math.min((elapsed / totalTime) * 100, 100);
+      setProgress(pct);
+    }, step);
+
+    timerRef.current = setTimeout(() => {
+      onTrigger();
+      setHolding(false);
+      setProgress(0);
+      clearInterval(progressIntervalRef.current);
+    }, totalTime);
+  };
+
+  const handleEnd = () => {
+    setHolding(false);
+    setProgress(0);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
+  };
+
+  const buttonActive = holding || esp32BootPressed;
+
+  return (
+    <div style={{
+      position: "relative", zIndex: 10, margin: "0 auto 20px",
+      maxWidth: 660, width: "calc(100% - 28px)",
+      background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)",
+      borderRadius: 24, padding: "20px 24px", display: "flex", flexDirection: "column", gap: 16,
+      backdropFilter: "blur(8px)",
+      boxShadow: "0 10px 30px rgba(0,0,0,0.3)"
+    }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: "1.5px", color: "rgba(255,255,255,0.3)", textTransform: "uppercase" }}>
+          Nút Bấm BOOT Chân 9 (Tương Tác Thực Tế)
+        </span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {/* Physical Button Status Indicator */}
+          <span style={{
+            fontSize: 9, padding: "2px 8px", borderRadius: 12, fontWeight: 700,
+            background: esp32BootPressed ? "rgba(235, 87, 87, 0.2)" : "rgba(39, 174, 96, 0.15)",
+            color: esp32BootPressed ? "#ff4d4d" : "#22c55e",
+            border: esp32BootPressed ? "1px solid rgba(235, 87, 87, 0.3)" : "1px solid rgba(39, 174, 96, 0.2)",
+            display: "inline-flex", alignItems: "center", gap: 4,
+            transition: "all 0.2s"
+          }}>
+            <span style={{
+              width: 5, height: 5, borderRadius: "50%",
+              backgroundColor: esp32BootPressed ? "#ff4d4d" : "#22c55e",
+              animation: esp32BootPressed ? "blinkDot 1s infinite" : "none"
+            }} />
+            {esp32BootPressed ? "NÚT VẬT LÝ ĐANG ĐƯỢC NHẤN" : "NÚT VẬT LÝ ĐANG NHẢ"}
+          </span>
+
+          <span style={{
+            fontSize: 9, padding: "2px 8px", borderRadius: 12, fontWeight: 700,
+            background: holding ? "rgba(248, 81, 73, 0.15)" : "rgba(255,255,255,0.05)",
+            color: holding ? "#ff5858" : "rgba(255,255,255,0.4)",
+            letterSpacing: 1,
+          }}>
+            {holding ? "DASHBOARD ĐANG GIỮ LỆNH" : "CHỜ NHẤN TRÊN WEB"}
+          </span>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
+        
+        <div style={{ position: "relative", flexShrink: 0, width: 68, height: 68, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          {/* Ring progress bar overlay */}
+          <svg style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", transform: "rotate(-90deg)" }}>
+            <circle
+              cx="34"
+              cy="34"
+              r="30"
+              fill="none"
+              stroke="rgba(255,255,255,0.04)"
+              strokeWidth="3"
+            />
+            <circle
+              cx="34"
+              cy="34"
+              r="30"
+              fill="none"
+              stroke={buttonActive ? "#ff5858" : "rgba(248, 81, 73, 0.2)"}
+              strokeWidth="3"
+              strokeDasharray="188.4"
+              strokeDashoffset={188.4 - (188.4 * progress) / 100}
+              style={{ transition: holding ? "none" : "stroke-dashoffset 0.15s ease-out" }}
+            />
+          </svg>
+
+          <button
+            onMouseDown={handleStart}
+            onMouseUp={handleEnd}
+            onMouseLeave={handleEnd}
+            onTouchStart={handleStart}
+            onTouchEnd={handleEnd}
+            style={{
+              zIndex: 1,
+              width: 52,
+              height: 52,
+              borderRadius: "50%",
+              background: buttonActive 
+                ? "radial-gradient(circle, #2d1012 0%, #1a0607 100%)" 
+                : "radial-gradient(circle, #1c2128 0%, #0d1117 100%)",
+              border: buttonActive ? "2px solid #ff5858" : "2px solid rgba(255,255,255,0.12)",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              boxShadow: buttonActive 
+                ? "0 0 20px rgba(248,81,73,0.5), inset 0 2px 8px rgba(0,0,0,0.6)" 
+                : "0 4px 12px rgba(0,0,0,0.5), inset 0 2px 4px rgba(255,255,255,0.05)",
+              color: buttonActive ? "#ff5858" : "rgba(255,255,255,0.7)",
+              fontSize: 10,
+              fontWeight: 800,
+              letterSpacing: "0.5px",
+              userSelect: "none",
+              outline: "none",
+              transform: buttonActive ? "scale(0.96)" : "scale(1)",
+              transition: "all 0.1s"
+            }}
+            title="Nhấn và giữ 3 giây để kích hoạt BOOT"
+          >
+            {holding ? `${Math.round(progress)}%` : "BOOT 9"}
+          </button>
+        </div>
+
+        <div style={{ flex: 1, minWidth: 200, display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{
+            fontSize: 13,
+            fontWeight: 600,
+            color: buttonActive ? "#ff5858" : "#ffffff",
+            transition: "all 0.2s"
+          }}>
+            {esp32BootPressed 
+              ? "🟢 PHÁT HIỆN: NÚT BOOT VẬT LÝ TRÊN ESP32-C3 ĐANG ĐƯỢC ĐỀ ĐÈ!"
+              : holding 
+                ? "⚠️ CẢNH BÁO: ĐANG GIỮ LỆNH BOOT REMOTE!" 
+                : "Xoá Wi-Fi & Reset từ xa qua Cloud"}
+          </div>
+          
+          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", lineHeight: "1.5" }}>
+            {esp32BootPressed ? (
+              <span>Có ai đó đang <strong style={{ color: "#ff4d4d" }}>nhấn phím vật lý BOOT trên bo mạch ESP32-C3</strong> (hoặc chân GPIO 9 đang được kéo xuống GND). Trạng thái nhận diện trực tiếp qua Cloud trong thời gian thực.</span>
+            ) : (
+              <span>Nút bấm này ánh xạ đến chân <strong style={{ color: "#fff" }}>BOOT 9 (GPIO 9) thực tế</strong> của chip ESP32-C3. Nhấn giữ nút tròn bên trái 3 giây trên Web để gửi lệnh xóa thông tin Wi-Fi và khởi động lại bo mạch từ xa mà không cần nhấn nút nhựa trên thiết bị.</span>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── App ───────────────────────────────────────────────────────
 export default function App() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [showFirmware, setShowFirmware] = useState(false);
+  const [activeTab, setActiveTab] = useState<"control" | "config">("control");
   const logId = useRef(0);
   const addLog = (type: LogType, msg: string) => {
     const time = new Date().toLocaleTimeString("vi-VN", { hour12:false });
     setLogs(prev => [...prev.slice(-99), { id: logId.current++, type, msg, time }]);
   };
 
-  const { states, connected, esp32Online, toggle } = useFirebase(addLog);
+  const [deviceLabels, setDeviceLabels] = useState<Record<string, string>>(() => {
+    const saved = localStorage.getItem("smart_home_device_labels");
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {}
+    }
+    return {
+      den_phong_khach: "Đèn Phòng Khách",
+      quat_tran: "Quạt Trần",
+      dieu_hoa: "Điều Hòa",
+      den_san_vuon: "Đèn Sân Vườn"
+    };
+  });
+
+  const saveLabel = (id: string, newLabel: string) => {
+    const updated = { ...deviceLabels, [id]: newLabel };
+    setDeviceLabels(updated);
+    localStorage.setItem("smart_home_device_labels", JSON.stringify(updated));
+    addLog("info", `Đã đổi tên công tắc sang: "${newLabel}"`);
+  };
+
+  const { states, connected, esp32Online, esp32Ssid, esp32Ip, esp32BootPressed, toggle, triggerWifiReset } = useFirebase(addLog, deviceLabels);
 
   const prevConn  = useRef<boolean | null>(null);
   const prevEsp32 = useRef<boolean | null>(null);
@@ -347,23 +968,117 @@ export default function App() {
         <h1 style={{ margin:"0 0 20px 0",fontSize:24,fontWeight:700,letterSpacing:2,textTransform:"uppercase",textAlign:"center",color:"#fff" }}>
           Smart Home OS V4.0
         </h1>
-        <div style={{ display:"flex",justifyContent:"center",gap:12 }}>
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexWrap: "wrap",
+          gap: 12,
+          padding: "8px 16px",
+          background: "rgba(255,255,255,0.02)",
+          border: "1px solid rgba(255,255,255,0.06)",
+          borderRadius: 20,
+          backdropFilter: "blur(4px)",
+          boxShadow: "0 4px 10px rgba(0,0,0,0.15)",
+        }}>
           <Badge label="FIREBASE" online={connected}/>
           <Badge label="ESP32-C3" online={esp32Online}/>
+
+          {esp32Online && (esp32Ssid || esp32Ip) && (
+            <>
+              <span style={{ color: "rgba(255,255,255,0.15)", fontSize: 11 }}>|</span>
+              {esp32Ssid && (
+                <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "rgba(255,255,255,0.45)" }}>
+                  <span style={{ display: "inline-block", width: 4, height: 4, borderRadius: "50%", background: "#00d4a0" }} />
+                  <span>Wi-Fi:</span>
+                  <strong style={{ color: "#fff", fontWeight: 600 }}>{esp32Ssid}</strong>
+                </span>
+              )}
+              {esp32Ssid && esp32Ip && (
+                <span style={{ color: "rgba(255,255,255,0.15)", fontSize: 11 }}>•</span>
+              )}
+              {esp32Ip && (
+                <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "rgba(255,255,255,0.45)" }}>
+                  <span>IP:</span>
+                  <strong style={{ color: "#fff", fontWeight: 600, fontFamily: "monospace" }}>{esp32Ip}</strong>
+                </span>
+              )}
+            </>
+          )}
         </div>
       </div>
 
+      {/* ── Tab Selector ────────────────────────────────────────── */}
       <div style={{
-        position:"relative",zIndex:10,
-        display:"grid",gridTemplateColumns:"repeat(4,1fr)",
-        gap:20,padding:"20px 14px",
-        maxWidth:660,margin:"0 auto",width:"100%",boxSizing:"border-box",
+        display: "flex",
+        justifyContent: "center",
+        gap: 12,
+        padding: "0 18px 24px",
+        position: "relative",
+        zIndex: 10
       }}>
-        {DEVICES.map(dev => (
-          <DeviceCard key={dev.id} label={dev.label} icon={dev.icon}
-            on={states[dev.id] || false} onToggle={() => toggle(dev.id)}/>
-        ))}
+        <button
+          onClick={() => setActiveTab("control")}
+          style={{
+            padding: "8px 20px",
+            borderRadius: 14,
+            fontSize: 11,
+            fontWeight: 800,
+            cursor: "pointer",
+            letterSpacing: "1px",
+            background: activeTab === "control" ? "rgba(0, 212, 160, 0.12)" : "rgba(255, 255, 255, 0.02)",
+            border: activeTab === "control" ? "1.5px solid #00d4a0" : "1.5px solid rgba(255, 255, 255, 0.08)",
+            color: activeTab === "control" ? "#00d4a0" : "rgba(255, 255, 255, 0.45)",
+            boxShadow: activeTab === "control" ? "0 4px 12px rgba(0, 212, 160, 0.15)" : "none",
+            transition: "all 0.25s ease",
+            textTransform: "uppercase",
+            outline: "none"
+          }}
+        >
+          🎛️ Bảng Điều Khiển
+        </button>
+        <button
+          onClick={() => setActiveTab("config")}
+          style={{
+            padding: "8px 20px",
+            borderRadius: 14,
+            fontSize: 11,
+            fontWeight: 800,
+            cursor: "pointer",
+            letterSpacing: "1px",
+            background: activeTab === "config" ? "rgba(255, 255, 255, 0.08)" : "rgba(255, 255, 255, 0.02)",
+            border: activeTab === "config" ? "1.5px solid rgba(255, 255, 255, 0.7)" : "1.5px solid rgba(255, 255, 255, 0.08)",
+            color: activeTab === "config" ? "#ffffff" : "rgba(255, 255, 255, 0.45)",
+            boxShadow: activeTab === "config" ? "0 4px 12px rgba(255, 255, 255, 0.08)" : "none",
+            transition: "all 0.25s ease",
+            textTransform: "uppercase",
+            outline: "none"
+          }}
+        >
+          ⚙️ Cấu Hình WiFi
+        </button>
       </div>
+
+      {activeTab === "control" ? (
+        <>
+          <div style={{
+            position:"relative",zIndex:10,
+            display:"grid",gridTemplateColumns:"repeat(4,1fr)",
+            gap:20,padding:"20px 14px",
+            maxWidth:660,margin:"0 auto",width:"100%",boxSizing:"border-box",
+          }}>
+            {DEVICES.map(dev => (
+              <DeviceCard key={dev.id} label={deviceLabels[dev.id] || dev.label} icon={dev.icon}
+                on={states[dev.id] || false} onToggle={() => toggle(dev.id)}
+                onRename={(newLabel) => saveLabel(dev.id, newLabel)}/>
+            ))}
+          </div>
+
+          <VoicePanel toggle={toggle} deviceLabels={deviceLabels} addLog={addLog} />
+        </>
+      ) : (
+        <RemoteBootButton onTrigger={triggerWifiReset} esp32Online={esp32Online} esp32BootPressed={esp32BootPressed} />
+      )}
 
       <ActivityLog logs={logs} onClear={() => setLogs([])}/>
 
@@ -503,14 +1218,32 @@ export default function App() {
 void initFirebase() {
   config.database_url = DATABASE_URL;
   config.api_key = DATABASE_API_KEY;
+
+  Serial.println("[FB-CONNECT] Dang khoi tao Firebase...");
+
+  // Đăng ký/Đăng nhập anonymous để lấy Token hợp lệ tự động từ Firebase API
+  if (Firebase.signUp(&config, &auth, "", "")) {
+    Serial.println("[FB-AUTH] Dang nhap anonymous thanh cong");
+    fbReady = true;
+  } else {
+    Serial.printf("[FB-AUTH] Loi dang nhap: %s\\n", config.signer.signupError.message.c_str());
+    fbReady = false;
+    return;
+  }
+
   Firebase.begin(&config, &auth);
-  Firebase.reconnectWiFi(true); // Tối ưu: Đã đổi sang reconnectWiFi(true)
-  
-  // Đã sửa: Khởi tạo luồng trực tiếp & gán fbReady = true bảo toàn độ tin cậy
+  Firebase.reconnectWiFi(true);
+
+  delay(2000);
   if (Firebase.RTDB.beginStream(&fbStream, "/devices")) {
     Firebase.RTDB.setStreamCallback(&fbStream, streamCallback, streamTimeoutCallback);
     streamActive = true;
-    fbReady = true; 
+    fbReady = true;
+    Serial.println("[STREAM] Bat dau dong bo /devices THANH CONG");
+  } else {
+    fbReady = false;
+    streamActive = false;
+    Serial.printf("[STREAM] Loi beginStream: %s\\n", fbStream.errorReason().c_str());
   }
 }`}
               </pre>
@@ -554,6 +1287,14 @@ void initFirebase() {
 
       <style>{`
         @keyframes blinkDot{0%,100%{opacity:1}50%{opacity:.2}}
+        @keyframes pulseWave {
+          0% { transform: scale(0.9); opacity: 1; }
+          100% { transform: scale(1.4); opacity: 0; }
+        }
+        @keyframes voiceBar {
+          0% { height: 2px; }
+          100% { height: 14px; }
+        }
         *{-webkit-tap-highlight-color:transparent;box-sizing:border-box}
         button{transition:transform .15s}
         button:active{transform:scale(.95)}
