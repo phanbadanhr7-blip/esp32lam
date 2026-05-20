@@ -966,7 +966,7 @@ export default function App() {
       <Stars/>
       <div style={{ position:"relative",zIndex:10,padding:"40px 18px 20px",display:"flex",flexDirection:"column",alignItems:"center" }}>
         <h1 style={{ margin:"0 0 20px 0",fontSize:24,fontWeight:700,letterSpacing:2,textTransform:"uppercase",textAlign:"center",color:"#fff" }}>
-          Smart Home OS V4.0
+          PHUC 370 SMART
         </h1>
         <div style={{
           display: "flex",
