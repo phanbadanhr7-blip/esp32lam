@@ -312,6 +312,7 @@ function ActivityLog({ logs, onClear }: ActivityLogProps) {
 // ── App ───────────────────────────────────────────────────────
 export default function App() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [showFirmware, setShowFirmware] = useState(false);
   const logId = useRef(0);
   const addLog = (type: LogType, msg: string) => {
     const time = new Date().toLocaleTimeString("vi-VN", { hour12:false });
@@ -365,6 +366,191 @@ export default function App() {
       </div>
 
       <ActivityLog logs={logs} onClear={() => setLogs([])}/>
+
+      <div style={{
+        position:"relative",
+        zIndex:10,
+        margin:"16px auto 0",
+        maxWidth:660,
+        width:"calc(100% - 28px)",
+        textAlign:"center"
+      }}>
+        <button
+          onClick={() => {
+            const url = "https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json";
+            setShowFirmware(true);
+          }}
+          style={{
+            background: "rgba(0, 212, 160, 0.1)",
+            border: "1px solid rgba(0, 212, 160, 0.3)",
+            borderRadius: 12,
+            color: "#00d4a0",
+            fontSize: 11,
+            fontWeight: 700,
+            padding: "10px 20px",
+            cursor: "pointer",
+            letterSpacing: 1,
+            textTransform: "uppercase",
+            transition: "all 0.3s"
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "rgba(0, 212, 160, 0.2)";
+            e.currentTarget.style.boxShadow = "0 0 15px rgba(0, 212, 160, 0.15)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "rgba(0, 212, 160, 0.1)";
+            e.currentTarget.style.boxShadow = "none";
+          }}
+        >
+          📄 Xem Firmware ESP32-C3 & Hướng Dẫn Nạp
+        </button>
+      </div>
+
+      {showFirmware && (
+        <div style={{
+          position: "fixed",
+          inset: 0,
+          background: "rgba(4, 6, 9, 0.85)",
+          backdropFilter: "blur(12px)",
+          zIndex: 100,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: 20
+        }}>
+          <div style={{
+            background: "#0d1117",
+            border: "1px solid rgba(255, 255, 255, 0.1)",
+            borderRadius: 24,
+            maxWidth: 800,
+            width: "100%",
+            maxHeight: "85vh",
+            display: "flex",
+            flexDirection: "column",
+            boxShadow: "0 20px 50px rgba(0, 0, 0, 0.6)",
+            overflow: "hidden"
+          }}>
+            <div style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "20px 24px",
+              borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
+              background: "rgba(0,0,0,0.2)"
+            }}>
+              <h2 style={{ margin: 0, fontSize: 16, fontWeight: 700, letterSpacing: 1, color: "#fff", textTransform: "uppercase" }}>
+                FIRMWARE ESP32-C3 SMART HOME
+              </h2>
+              <button
+                onClick={() => setShowFirmware(false)}
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "rgba(255,255,255,0.4)",
+                  fontSize: 24,
+                  cursor: "pointer",
+                  padding: 0,
+                  lineHeight: 1
+                }}
+              >
+                &times;
+              </button>
+            </div>
+
+            <div style={{
+              overflowY: "auto",
+              padding: 24,
+              fontSize: 13,
+              color: "rgba(255, 255, 255, 0.8)",
+              lineHeight: 1.6
+            }}>
+              <h3 style={{ marginTop: 0, color: "#00d4a0", fontSize: 14 }}>1. Sơ đồ kết nối phần cứng (GPIO)</h3>
+              <ul style={{ paddingLeft: 20, margin: "8px 0" }}>
+                <li><strong>GPIO 1:</strong> Đèn Phòng Khách (den_phong_khach)</li>
+                <li><strong>GPIO 2:</strong> Quạt Trần (quat_tran)</li>
+                <li><strong>GPIO 3:</strong> Điều Hòa (dieu_hoa)</li>
+                <li><strong>GPIO 4:</strong> Đèn Sân Vườn (den_san_vuon)</li>
+                <li><strong>GPIO 9:</strong> Nút BOOT thiết bị (Ghi đè/Reset WiFi)</li>
+              </ul>
+              <p style={{ fontSize: 12, color: "rgba(255, 255, 255, 0.5)", margin: "4px 0" }}>
+                * Chế độ hoạt động Relay kích LOW (Active LOW: LOW = BẬT, HIGH = TẮT).
+              </p>
+
+              <h3 style={{ marginTop: 20, color: "#00d4a0", fontSize: 14 }}>2. Source Code Arduino (.ino)</h3>
+              <p style={{ margin: "4px 0" }}>Bạn đã lưu tệp này thành công tại mục <code>/firmware/ESP32_SmartHome.ino</code> và <code>README.md</code>. Bạn có thể xem kỹ bản copy nhanh dưới đây:</p>
+              
+              <pre style={{
+                background: "#161b22",
+                padding: 16,
+                borderRadius: 12,
+                overflowX: "auto",
+                fontFamily: "monospace",
+                fontSize: 11,
+                border: "1px solid rgba(255,255,255,0.05)",
+                color: "#c9d1d9",
+                whiteSpace: "pre",
+                maxHeight: 250,
+                marginTop: 10
+              }}>
+{`#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiManager.h>
+#include <Firebase_ESP_Client.h>
+
+#define DATABASE_URL "https://esp32-f210f-default-rtdb.asia-southeast1.firebasedatabase.app"
+#define DATABASE_API_KEY "AIzaSyAKR90UMhbD5ScOYEFMEQxqh60JjTa_4fo"
+
+void initFirebase() {
+  config.database_url = DATABASE_URL;
+  config.api_key = DATABASE_API_KEY;
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true); // Tối ưu: Đã đổi sang reconnectWiFi(true)
+  
+  // Đã sửa: Khởi tạo luồng trực tiếp & gán fbReady = true bảo toàn độ tin cậy
+  if (Firebase.RTDB.beginStream(&fbStream, "/devices")) {
+    Firebase.RTDB.setStreamCallback(&fbStream, streamCallback, streamTimeoutCallback);
+    streamActive = true;
+    fbReady = true; 
+  }
+}`}
+              </pre>
+
+              <h3 style={{ marginTop: 20, color: "#00d4a0", fontSize: 14 }}>3. Cách nạp Code &amp; Kết nối</h3>
+              <ol style={{ paddingLeft: 20, margin: "8px 0" }}>
+                <li>Cài đặt thư viện <strong>Firebase ESP Client</strong>, <strong>WiFiManager</strong>, và <strong>ArduinoJson</strong> trên Arduino IDE.</li>
+                <li>Chọn đúng board <strong>ESP32C3 Dev Module</strong> và kích hoạt cấu hình <code>USB CDC On Boot: Enabled</code>.</li>
+                <li>Nạp code và khởi chạy thiết bị. Thiết bị sẽ phát ra một điểm WiFi tên là <strong>ESP32_SmartHome</strong> (Mật khẩu: <code>12345678</code>). Kết nối và truy cập <code>192.168.4.1</code> để liên kết mạng WiFi gia đình của bạn.</li>
+                <li><strong>Tự động khôi phục / Không cần Token:</strong> Mã nguồn mới đã được thiết lập tính năng tự động chuyển đổi sang chế độ Công khai (Public Mode/Guest) nếu không khởi tạo được Token. Bạn chỉ cần đảm bảo Database Rules đang mở ở chế độ phát triển (read/write: true) hoặc đã bật Anonymous Authentication.</li>
+              </ol>
+            </div>
+
+            <div style={{
+              display: "flex",
+              justifyContent: "flex-end",
+              padding: "16px 24px",
+              borderTop: "1px solid rgba(255, 255, 255, 0.08)",
+              background: "rgba(0,0,0,0.1)"
+            }}>
+              <button
+                onClick={() => setShowFirmware(false)}
+                style={{
+                  background: "#00d4a0",
+                  border: "none",
+                  borderRadius: 10,
+                  color: "#040609",
+                  padding: "8px 20px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  fontSize: 12,
+                  textTransform: "uppercase"
+                }}
+              >
+                Đồng ý
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <style>{`
         @keyframes blinkDot{0%,100%{opacity:1}50%{opacity:.2}}
